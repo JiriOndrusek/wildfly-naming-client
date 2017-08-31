@@ -30,6 +30,7 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.security.PrivilegedAction;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.ServiceConfigurationError;
@@ -51,6 +52,8 @@ import javax.naming.directory.SearchControls;
 import javax.naming.directory.SearchResult;
 import javax.naming.spi.NamingManager;
 
+import org.wildfly.client.config.ConfigXMLParseException;
+import org.wildfly.client.config.ConfigurationXMLStreamReader;
 import org.wildfly.common.Assert;
 import org.wildfly.common.expression.Expression;
 import org.wildfly.naming.client._private.Messages;
@@ -816,6 +819,11 @@ public final class WildFlyRootContext implements DirContext {
     private List<URI> getProviderUris() throws NamingException {
         final FastHashtable<String, Object> env = getEnvironment();
         Object urlString = env.get(Context.PROVIDER_URL);
+
+        if(urlString == null) {
+            urlString = getWildflyConfigConnection(urlString);
+        }
+
         if (urlString != null) {
             String providerUrl = Expression.compile(urlString.toString(), Expression.Flag.LENIENT_SYNTAX).evaluateWithPropertiesAndEnvironment(false);
             if (! providerUrl.isEmpty()) {
@@ -878,6 +886,83 @@ public final class WildFlyRootContext implements DirContext {
         }
         // no EJB connection properties were specified; nothing left to try
         return null;
+    }
+
+    private Object getWildflyConfigConnection(Object urlString) {
+        String NS_EJB_CLIENT_3_0 = "urn:jboss:wildfly-client-ejb:3.0";
+        String NS_INCORRECT = "urn:jboss:ejb-client:3.0";
+        try (final ConfigurationXMLStreamReader streamReader = org.wildfly.client.config.ClientConfiguration.getInstance().readConfiguration(Collections.singleton(NS_EJB_CLIENT_3_0))) {
+
+            URI uri = null;
+            if (streamReader.hasNext()) {
+                if (streamReader.nextTag() == javax.xml.stream.XMLStreamConstants.START_ELEMENT) {
+                    String namespaceURI = streamReader.getNamespaceURI();
+                    // TODO: temporary
+                    if (namespaceURI.equals(NS_INCORRECT)) {
+                        throw new ConfigXMLParseException("The namespace \"" + NS_INCORRECT + "\" was incorrect; replace with \"" + NS_EJB_CLIENT_3_0 + "\"", streamReader);
+                    }
+                    if (!namespaceURI.equals(NS_EJB_CLIENT_3_0) || !streamReader.getLocalName().equals("jboss-ejb-client")) {
+                        throw streamReader.unexpectedElement();
+                    }
+                    boolean gotConnections = false;
+
+                    for (; ; ) {
+                        if(urlString != null) break;
+                        final int next = streamReader.nextTag();
+                        if (next == javax.xml.stream.XMLStreamConstants.START_ELEMENT) {
+                            if (!streamReader.getNamespaceURI().equals(NS_EJB_CLIENT_3_0)) {
+                                throw streamReader.unexpectedElement();
+                            }
+                            final String localName = streamReader.getLocalName();
+                            if (localName.equals("connections") && !gotConnections) {
+                                gotConnections = true;
+
+
+                                for (; ; ) {
+                                    if(urlString != null) break;
+                                    final int n = streamReader.nextTag();
+                                    if (n == javax.xml.stream.XMLStreamConstants.START_ELEMENT) {
+                                        if (!streamReader.getNamespaceURI().equals(NS_EJB_CLIENT_3_0)) {
+                                            throw streamReader.unexpectedElement();
+                                        }
+                                        final String l = streamReader.getLocalName();
+                                        if (l.equals("connection")) {
+                                            final int attributeCount = streamReader.getAttributeCount();
+                                            for (int i = 0; i < attributeCount; i++) {
+                                                if (streamReader.getAttributeNamespace(i) != null && !streamReader.getAttributeNamespace(i).isEmpty() || !streamReader.getAttributeLocalName(i).equals("uri") || uri != null) {
+                                                    throw streamReader.unexpectedAttribute(i);
+                                                }
+                                                uri = streamReader.getURIAttributeValueResolved(i);
+                                                urlString = uri.toString();
+                                                break;
+                                            }
+
+                                        } else {
+                                            throw streamReader.unexpectedElement();
+                                        }
+                                    } else if (next == javax.xml.stream.XMLStreamConstants.END_ELEMENT) {
+                                        break;
+                                    } else {
+                                        throw Assert.unreachableCode();
+                                    }
+                                }
+
+                            } else {
+                                throw streamReader.unexpectedElement();
+                            }
+                        } else if (next == javax.xml.stream.XMLStreamConstants.END_ELEMENT) {
+                            break;
+                        } else {
+                            throw Assert.unreachableCode();
+                        }
+                    }
+                }
+            }
+        } catch(Exception e) {
+            e.printStackTrace();
+            return null;
+        }
+        return urlString;
     }
 
     private String getStringProperty(final String propertyName, final FastHashtable<String, Object> env) {
